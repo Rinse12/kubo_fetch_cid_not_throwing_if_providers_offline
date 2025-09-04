@@ -2,9 +2,13 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const http = require('http');
 
 // Configuration
-const CID_FETCH_TIMEOUT_MS = 60000; // Timeout for CID fetch operation in milliseconds
+const CID_FETCH_TIMEOUT_MS = 120000; // Timeout for CID fetch operation in milliseconds
+const HTTP_ROUTER_1_PORT = 19999;
+const HTTP_ROUTER_2_PORT = 19998;
+const IGNORE_ERRORS = true; // Set to true to test with IgnoreErrors: true
 
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -31,8 +35,8 @@ async function checkRequiredPorts() {
     { port: 54321, description: 'Kubo Swarm' },
     { port: 54322, description: 'Kubo API' },
     { port: 54323, description: 'Kubo Gateway' },
-    { port: 19999, description: 'HTTP Router 1 (should be offline)' },
-    { port: 19998, description: 'HTTP Router 2 (should be offline)' }
+    { port: HTTP_ROUTER_1_PORT, description: 'HTTP Router 1 (will return no providers)' },
+    { port: HTTP_ROUTER_2_PORT, description: 'HTTP Router 2 (will return no providers)' }
   ];
   
   console.log('Checking required ports...');
@@ -40,27 +44,69 @@ async function checkRequiredPorts() {
   for (const { port, description } of requiredPorts) {
     const isFree = await checkPortFree(port);
     
-    if (port === 19999 || port === 19998) {
-      if (!isFree) {
-        console.log(`❌ Port ${port} (${description}) is occupied - this may interfere with the test`);
-        console.log(`   Please stop any service using port ${port}`);
-        return false;
-      } else {
-        console.log(`✅ Port ${port} (${description}) is free (as expected)`);
-      }
+    if (!isFree) {
+      console.log(`❌ Port ${port} (${description}) is occupied`);
+      console.log(`   Please stop any service using port ${port}`);
+      return false;
     } else {
-      if (!isFree) {
-        console.log(`❌ Port ${port} (${description}) is occupied`);
-        console.log(`   Please stop any IPFS daemon or service using port ${port}`);
-        return false;
-      } else {
-        console.log(`✅ Port ${port} (${description}) is free`);
-      }
+      console.log(`✅ Port ${port} (${description}) is free`);
     }
   }
   
   console.log('All required ports are available\n');
   return true;
+}
+
+function createNoProvidersHttpRouter(port) {
+  const server = http.createServer((req, res) => {
+    console.log(`HTTP Router on port ${port} received request: ${req.method} ${req.url}`);
+    
+    // Handle CORS
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200);
+      res.end();
+      return;
+    }
+    
+    // Handle provider queries according to IPFS HTTP Routing V1 spec
+    if (req.method === 'GET' && req.url.match(/\/routing\/v1\/providers\/[^\/]+/)) {
+      console.log(`HTTP Router on port ${port} returning 404 (no providers found) for provider query`);
+      // According to spec: 404 indicates "no matching records are found"
+      res.writeHead(404, { 
+        'Content-Type': 'application/json',
+        'Cache-Control': 'public, max-age=300'
+      });
+      res.end(JSON.stringify({
+        Message: "no providers found"
+      }));
+      return;
+    }
+    
+    // Handle other routing endpoints
+    if (req.url.startsWith('/routing/v1/')) {
+      console.log(`HTTP Router on port ${port} handling routing request: ${req.url}`);
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ Message: "not found" }));
+      return;
+    }
+    
+    // For non-routing requests, return 404
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ Message: "not found" }));
+  });
+  
+  return new Promise((resolve, reject) => {
+    server.listen(port, '127.0.0.1', () => {
+      console.log(`HTTP Router started on port ${port} (will return 404 for provider queries)`);
+      resolve(server);
+    });
+    
+    server.on('error', reject);
+  });
 }
 
 async function runCommand(command, args, options = {}) {
@@ -108,7 +154,7 @@ async function initializeIpfsRepo(ipfsRepoPath) {
   const configPath = path.join(ipfsRepoPath, 'config');
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   
-  // Configure routing to use offline HTTP routers for provider finding
+  // Configure routing to use HTTP routers that return no providers
   config.Routing = {
     "Methods": {
       "find-peers": {
@@ -130,13 +176,13 @@ async function initializeIpfsRepo(ipfsRepoPath) {
     "Routers": {
       "HttpRouter1": {
         "Parameters": {
-          "Endpoint": "http://127.0.0.1:19999"
+          "Endpoint": `http://127.0.0.1:${HTTP_ROUTER_1_PORT}`
         },
         "Type": "http"
       },
       "HttpRouter2": {
         "Parameters": {
-          "Endpoint": "http://127.0.0.1:19998"
+          "Endpoint": `http://127.0.0.1:${HTTP_ROUTER_2_PORT}`
         },
         "Type": "http"
       },
@@ -150,12 +196,12 @@ async function initializeIpfsRepo(ipfsRepoPath) {
         "Parameters": {
           "Routers": [
             {
-              "IgnoreErrors": false,
+              "IgnoreErrors": IGNORE_ERRORS,
               "RouterName": "HttpRouter1",
               "Timeout": "5s"
             },
             {
-              "IgnoreErrors": false,
+              "IgnoreErrors": IGNORE_ERRORS,
               "RouterName": "HttpRouter2", 
               "Timeout": "5s"
             }
@@ -183,7 +229,7 @@ async function initializeIpfsRepo(ipfsRepoPath) {
   config.Discovery.MDNS.Enabled = false;
   
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-  console.log('IPFS config updated with offline HTTP routers for provider finding');
+  console.log('IPFS config updated with HTTP routers that return no providers');
 }
 
 async function verifyKuboVersion(expectedVersion = '0.37.0') {
@@ -210,7 +256,7 @@ async function verifyKuboVersion(expectedVersion = '0.37.0') {
 }
 
 async function verifyKuboConfig(ipfsRepoPath) {
-  console.log('Verifying kubo config for provider finding with offline routers...');
+  console.log('Verifying kubo config for HTTP routers that return no providers...');
   
   const kuboPath = path.join(__dirname, 'node_modules', 'kubo', 'kubo', 'ipfs');
   const result = await runCommand(kuboPath, ['config', 'show'], {
@@ -235,28 +281,28 @@ async function verifyKuboConfig(ipfsRepoPath) {
   const httpRouter1 = config.Routing?.Routers?.HttpRouter1;
   const httpRouter2 = config.Routing?.Routers?.HttpRouter2;
   
-  if (httpRouter1?.Parameters?.Endpoint !== 'http://127.0.0.1:19999') {
-    throw new Error(`Expected HttpRouter1 endpoint to be 'http://127.0.0.1:19999', got '${httpRouter1?.Parameters?.Endpoint}'`);
+  if (httpRouter1?.Parameters?.Endpoint !== `http://127.0.0.1:${HTTP_ROUTER_1_PORT}`) {
+    throw new Error(`Expected HttpRouter1 endpoint to be 'http://127.0.0.1:${HTTP_ROUTER_1_PORT}', got '${httpRouter1?.Parameters?.Endpoint}'`);
   }
   
-  if (httpRouter2?.Parameters?.Endpoint !== 'http://127.0.0.1:19998') {
-    throw new Error(`Expected HttpRouter2 endpoint to be 'http://127.0.0.1:19998', got '${httpRouter2?.Parameters?.Endpoint}'`);
+  if (httpRouter2?.Parameters?.Endpoint !== `http://127.0.0.1:${HTTP_ROUTER_2_PORT}`) {
+    throw new Error(`Expected HttpRouter2 endpoint to be 'http://127.0.0.1:${HTTP_ROUTER_2_PORT}', got '${httpRouter2?.Parameters?.Endpoint}'`);
   }
   
   const parallelRouters = config.Routing?.Routers?.HttpRoutersParallel?.Parameters?.Routers;
   if (parallelRouters) {
     for (const router of parallelRouters) {
-      if (router.IgnoreErrors !== false) {
-        throw new Error(`Expected IgnoreErrors to be false for ${router.RouterName}, got ${router.IgnoreErrors}`);
+      if (router.IgnoreErrors !== IGNORE_ERRORS) {
+        throw new Error(`Expected IgnoreErrors to be ${IGNORE_ERRORS} for ${router.RouterName}, got ${router.IgnoreErrors}`);
       }
     }
   }
   
-  console.log('✅ Kubo config verified: offline routers configured for provider finding');
+  console.log('✅ Kubo config verified: HTTP routers configured to return no providers');
 }
 
-async function testOfflinePeerRouting() {
-  console.log('Testing kubo provider finding behavior with offline HTTP routers...\n');
+async function testNoProvidersHttpRouting() {
+  console.log('Testing kubo provider finding behavior with HTTP routers that return no providers...\n');
 
   try {
     await verifyKuboVersion();
@@ -279,8 +325,20 @@ async function testOfflinePeerRouting() {
     console.error('Failed to initialize IPFS repo:', error);
     process.exit(1);
   }
+
+  console.log('\n1. Starting HTTP routers that return no providers...');
   
-  console.log('\n1. Starting IPFS daemon with offline HTTP routers...');
+  let httpRouter1, httpRouter2;
+  
+  try {
+    httpRouter1 = await createNoProvidersHttpRouter(HTTP_ROUTER_1_PORT);
+    httpRouter2 = await createNoProvidersHttpRouter(HTTP_ROUTER_2_PORT);
+  } catch (error) {
+    console.error('Failed to start HTTP routers:', error);
+    process.exit(1);
+  }
+  
+  console.log('\n2. Starting IPFS daemon...');
   
   const kuboPath = path.join(__dirname, 'node_modules', 'kubo', 'kubo', 'ipfs');
   const daemon = spawn(kuboPath, ['daemon'], {
@@ -319,17 +377,17 @@ async function testOfflinePeerRouting() {
     }
   }
 
-  console.log('\n2. Daemon is ready. Verifying configuration...\n');
+  console.log('\n3. Daemon is ready. Verifying configuration...\n');
   
   try {
     await verifyKuboConfig(ipfsRepoPath);
   } catch (error) {
     console.error(`❌ Config verification failed: ${error.message}`);
-    await cleanupDaemon(daemon);
+    await cleanup(daemon, httpRouter1, httpRouter2);
     process.exit(1);
   }
 
-  console.log('\n3. Testing CID fetching with offline HTTP routers...\n');
+  console.log('\n4. Testing CID fetching with HTTP routers returning no providers...\n');
 
   try {
     const testCid = 'QmYjtig7VJQ6XsnUjqqJvj7QaMcCAwtrgNdahSiFofrE7o'; // Hello World CID
@@ -394,61 +452,69 @@ async function testOfflinePeerRouting() {
     
     if (!getExited) {
       console.log('❌ BUG CONFIRMED: CID fetch hung without proper error handling');
-      console.log('Expected: Operation should fail IMMEDIATELY with clear error message since all HTTP routers are offline');
-      console.log('         (No waiting/timeout needed - kubo should detect unreachable routers instantly)');
+      console.log('Expected: Operation should fail QUICKLY with clear error message since routers return no providers');
+      console.log('         (Should detect empty provider responses and fail gracefully)');
       console.log('Actual: Operation hangs indefinitely during provider discovery without any error output');
     } else if (getExitCode !== 0 && getError.length > 0) {
       console.log('✅ EXPECTED: CID fetch failed quickly with error message');
-      console.log('This is the expected behavior when routers are offline');
+      console.log('This is the expected behavior when routers return no providers');
       
-      if (getError.includes('connection refused') || getError.includes('connect: connection refused') || getError.includes('offline') || getError.includes('router')) {
-        console.log('✅ Proper error messages about connection/router issues');
+      if (getError.includes('no providers') || getError.includes('not found') || getError.includes('routing')) {
+        console.log('✅ Proper error messages about no providers found');
       } else {
-        console.log('⚠️  Error messages could be more specific about offline routers');
+        console.log('⚠️  Error messages could be more specific about no providers returned');
       }
     } else if (getExitCode !== 0 && getError.length === 0) {
       console.log('❌ BUG CONFIRMED: CID fetch failed but without proper error message');
-      console.log('Expected: Clear error message explaining that HTTP routers are offline/unreachable');
-      console.log('         (Should fail immediately since all routers are offline)');
+      console.log('Expected: Clear error message explaining that no providers were found');
+      console.log('         (Should fail quickly since routers return empty provider lists)');
       console.log('Actual: Silent failure without informative error message');
     } else if (getExitCode === 0) {
-      console.log('❌ UNEXPECTED: CID fetch succeeded despite offline routers');
+      console.log('❌ UNEXPECTED: CID fetch succeeded despite no providers returned');
       console.log('This suggests the content was found via alternative means (local cache, etc.)');
     } else {
       console.log('❌ BUG CONFIRMED: CID fetch timed out without proper error handling');
-      console.log('Expected: Operation should fail IMMEDIATELY with clear error message since all HTTP routers are offline');
-      console.log('         (No timeout should be needed - kubo should detect connection failures instantly)');
+      console.log('Expected: Operation should fail QUICKLY with clear error message since routers return no providers');
+      console.log('         (No long timeout should be needed - kubo should detect empty provider responses quickly)');
       console.log('Actual: Operation was killed after timeout without any error output');
     }
 
   } catch (error) {
     console.log('\n🔍 Exception caught during operations:');
     console.log('Error:', error.message);
-    console.log('This could indicate proper error handling when routers are offline');
+    console.log('This could indicate proper error handling when no providers are returned');
   } finally {
-    await cleanupDaemon(daemon);
+    await cleanup(daemon, httpRouter1, httpRouter2);
     console.log('\nTest completed.');
   }
 }
 
-async function cleanupDaemon(daemon) {
-  if (!daemon || daemon.exitCode !== null) {
-    return;
+async function cleanup(daemon, httpRouter1, httpRouter2) {
+  if (daemon && daemon.exitCode === null) {
+    console.log('\n5. Shutting down daemon...');
+    daemon.kill('SIGTERM');
+    
+    let attempts = 0;
+    while (daemon.exitCode === null && attempts < 10) {
+      await sleep(500);
+      attempts++;
+    }
+    
+    if (daemon.exitCode === null) {
+      console.log('Force killing daemon...');
+      daemon.kill('SIGKILL');
+      await sleep(1000);
+    }
   }
   
-  console.log('\n4. Shutting down daemon...');
-  daemon.kill('SIGTERM');
-  
-  let attempts = 0;
-  while (daemon.exitCode === null && attempts < 10) {
-    await sleep(500);
-    attempts++;
+  if (httpRouter1) {
+    console.log('Shutting down HTTP Router 1...');
+    httpRouter1.close();
   }
   
-  if (daemon.exitCode === null) {
-    console.log('Force killing daemon...');
-    daemon.kill('SIGKILL');
-    await sleep(1000);
+  if (httpRouter2) {
+    console.log('Shutting down HTTP Router 2...');
+    httpRouter2.close();
   }
 }
 
@@ -462,7 +528,7 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-testOfflinePeerRouting().catch(error => {
+testNoProvidersHttpRouting().catch(error => {
   console.error('Test failed:', error);
   process.exit(1);
 });
