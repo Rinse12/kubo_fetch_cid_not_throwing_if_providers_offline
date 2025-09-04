@@ -5,6 +5,8 @@ const net = require('net');
 
 // Configuration
 const SKIP_FINDPROVS_TEST = true; // Set to true to skip findprovs and go straight to CID fetching
+const FINDPROVS_TIMEOUT_MS = 30000; // Timeout for findprovs operation in milliseconds
+const CID_FETCH_TIMEOUT_MS = 60000; // Timeout for CID fetch operation in milliseconds
 
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -365,14 +367,13 @@ async function testOfflinePeerRouting() {
       });
 
       const startTime = Date.now();
-      const timeout = 30000; // 30 seconds
       
-      while (!findProvidersExited && (Date.now() - startTime) < timeout) {
+      while (!findProvidersExited && (Date.now() - startTime) < FINDPROVS_TIMEOUT_MS) {
         await sleep(100);
       }
 
       if (!findProvidersExited) {
-        console.log('FIND PROVIDERS OPERATION TIMED OUT after 30 seconds');
+        console.log(`FIND PROVIDERS OPERATION TIMED OUT after ${FINDPROVS_TIMEOUT_MS / 1000} seconds`);
         findProvidersProcess.kill('SIGKILL');
         await sleep(1000);
       }
@@ -438,10 +439,9 @@ async function testOfflinePeerRouting() {
     });
 
     const startTime2 = Date.now();
-    const timeout2 = 60000; // 60 seconds for CID fetch
     
-    console.log('Waiting for CID fetch to complete (60 second timeout)...');
-    while (!getExited && (Date.now() - startTime2) < timeout2) {
+    console.log(`Waiting for CID fetch to complete (${CID_FETCH_TIMEOUT_MS / 1000} second timeout)...`);
+    while (!getExited && (Date.now() - startTime2) < CID_FETCH_TIMEOUT_MS) {
       await sleep(1000);
       if ((Date.now() - startTime2) % 10000 === 0) {
         console.log(`Still waiting... ${Math.floor((Date.now() - startTime2) / 1000)}s elapsed`);
@@ -449,7 +449,7 @@ async function testOfflinePeerRouting() {
     }
 
     if (!getExited) {
-      console.log('CID FETCH OPERATION TIMED OUT after 60 seconds');
+      console.log(`CID FETCH OPERATION TIMED OUT after ${CID_FETCH_TIMEOUT_MS / 1000} seconds`);
       getProcess.kill('SIGKILL');
       await sleep(1000);
     }
