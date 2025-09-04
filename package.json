@@ -1,0 +1,15 @@
+{
+  "name": "kubo-offline-router-test",
+  "version": "1.0.0",
+  "description": "Test script to verify kubo behavior with offline HTTP routers for peer finding",
+  "main": "test-offline-peer-routing.js",
+  "scripts": {
+    "test": "node test-offline-peer-routing.js",
+    "install-kubo": "npm install kubo@0.37.0"
+  },
+  "dependencies": {
+    "kubo": "0.37.0"
+  },
+  "author": "",
+  "license": "MIT"
+}
